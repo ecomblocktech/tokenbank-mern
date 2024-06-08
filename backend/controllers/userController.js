@@ -1,192 +1,196 @@
-import asyncHandler from '../middleware/asyncHandler.js';
-import generateToken from '../utils/generateToken.js';
-import User from '../models/userModel.js';
+const multer = require('multer');
+const geoip = require('geoip-lite');
+const fs = require('fs');
+// const sharp = require('sharp');
+const User = require('../models/user.model');
+const Message = require('../models/message.model');
+const Wallet = require('../models/wallet.model');
+const { createSendToken } = require('./authController');
+const sendError = require('./assets/errorController');
+const factory = require('./assets/handlerFactory');
+const { userTiers } = require('../utils/staticData');
+const { getPrices } = require('../services/interval');
 
-// @desc    Auth user & get token
-// @route   POST /api/users/auth
-// @access  Public
-const authUser = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-
-  const user = await User.findOne({ email });
-
-  if (user && (await user.matchPassword(password))) {
-    generateToken(res, user._id);
-
-    res.json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      isAdmin: user.isAdmin,
-    });
-  } else {
-    res.status(401);
-    throw new Error('Invalid email or password');
+// const multerStorage = multer.memoryStorage();
+const multerStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'client/public/image/users');
+  },
+  filename: function (req, file, cb) {
+    const filename = `user-${req.user.id}-${Date.now()}.jpeg`;
   }
+})
+const multerFilter = (req, file, callback) => {
+  if(file.mimetype.startsWith('image')) {
+    callback(null, true);
+  } else {
+    callback(new Error('Not an image. Please upload only images'), false);
+  }
+};
+const upload = multer({
+  storage: multerStorage,
+  fileFilter: multerFilter
 });
 
-// @desc    Register a new user
-// @route   POST /api/users
-// @access  Public
-const registerUser = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.body;
+exports.uploadUserPhoto = upload.single('photo');
+// exports.resizeUserPhoto = async (req, res, next) => {
+//   // console.log(req.file);
+//   try {
+//     if(!req.file) return next();
+//     req.file.filename = `user-${req.user.id}-${Date.now()}.jpeg`;
+//     await sharp(req.file.buffer)
+//       .resize(500, 500)
+//       .toFormat('jpeg')
+//       // .jpeg({quality: 90})
+//       .toFile(`client/public/image/users/${req.file.filename}`);
 
-  const userExists = await User.findOne({ email });
+//     next();
+//   } catch(err) {
+//     sendError(err, 400, req, res);
+//   }
+// };
 
-  if (userExists) {
-    res.status(400);
-    throw new Error('User already exists');
-  }
-
-  const user = await User.create({
-    name,
-    email,
-    password,
+const filterObj = (obj, ...allowFields) => {
+  const newObj= {};
+  Object.keys(obj).forEach(el => {
+    if(allowFields.includes(el)) newObj[el] = obj[el];
   });
-
-  if (user) {
-    generateToken(res, user._id);
-
-    res.status(201).json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      isAdmin: user.isAdmin,
-    });
-  } else {
-    res.status(400);
-    throw new Error('Invalid user data');
-  }
-});
-
-// @desc    Logout user / clear cookie
-// @route   POST /api/users/logout
-// @access  Public
-const logoutUser = (req, res) => {
-  res.clearCookie('jwt');
-  res.status(200).json({ message: 'Logged out successfully' });
+  return newObj;
 };
 
-// @desc    Get user profile
-// @route   GET /api/users/profile
-// @access  Private
-const getUserProfile = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
-
-  if (user) {
-    res.json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      isAdmin: user.isAdmin,
-    });
-  } else {
-    res.status(404);
-    throw new Error('User not found');
-  }
-});
-
-// @desc    Update user profile
-// @route   PUT /api/users/profile
-// @access  Private
-const updateUserProfile = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
-
-  if (user) {
-    user.name = req.body.name || user.name;
-    user.email = req.body.email || user.email;
-
-    if (req.body.password) {
-      user.password = req.body.password;
+exports.upgradeUserTier = async (req, res) => {
+  try {
+    const { tier, asset } = req.body;
+    const balance = await Wallet.findOne({ user: req.user.id }).select('-user');
+    const coinPrices = await getPrices();
+    // check if balance is sufficient
+    const isSufficientBalance = balance[asset] * coinPrices[asset]?.price > userTiers[tier]?.required;
+    if(!isSufficientBalance) {
+      return sendError({message: {balance: 'Insufficient balance'}}, 400, req, res);
     }
 
-    const updatedUser = await user.save();
+    const newAssetBalance = Number(balance[asset] - (userTiers[tier]?.required / coinPrices[asset]?.price)).toFixed(8);
 
-    res.json({
-      _id: updatedUser._id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      isAdmin: updatedUser.isAdmin,
+    await Wallet.findByIdAndUpdate(balance._id, { [asset]: newAssetBalance });
+
+    const updatedUser = await User.findByIdAndUpdate(req.user.id, { tier }, {
+      new: true,
+      runValidator: true
     });
-  } else {
-    res.status(404);
-    throw new Error('User not found');
+
+    createSendToken(updatedUser, 200, res);
+  } catch (err) {
+    sendError(err, 400, req, res);
   }
-});
-
-// @desc    Get all users
-// @route   GET /api/users
-// @access  Private/Admin
-const getUsers = asyncHandler(async (req, res) => {
-  const users = await User.find({});
-  res.json(users);
-});
-
-// @desc    Delete user
-// @route   DELETE /api/users/:id
-// @access  Private/Admin
-const deleteUser = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id);
-
-  if (user) {
-    if (user.isAdmin) {
-      res.status(400);
-      throw new Error('Can not delete admin user');
-    }
-    await User.deleteOne({ _id: user._id });
-    res.json({ message: 'User removed' });
-  } else {
-    res.status(404);
-    throw new Error('User not found');
-  }
-});
-
-// @desc    Get user by ID
-// @route   GET /api/users/:id
-// @access  Private/Admin
-const getUserById = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id).select('-password');
-
-  if (user) {
-    res.json(user);
-  } else {
-    res.status(404);
-    throw new Error('User not found');
-  }
-});
-// @desc    Update user
-// @route   PUT /api/users/:id
-// @access  Private/Admin
-const updateUser = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id);
-
-  if (user) {
-    user.name = req.body.name || user.name;
-    user.email = req.body.email || user.email;
-    user.isAdmin = Boolean(req.body.isAdmin);
-
-    const updatedUser = await user.save();
-
-    res.json({
-      _id: updatedUser._id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      isAdmin: updatedUser.isAdmin,
-    });
-  } else {
-    res.status(404);
-    throw new Error('User not found');
-  }
-});
-
-export {
-  authUser,
-  registerUser,
-  logoutUser,
-  getUserProfile,
-  updateUserProfile,
-  getUsers,
-  deleteUser,
-  getUserById,
-  updateUser,
 };
+
+exports.getMe = (req, res, next) => {
+  req.params.id = req.user.id;
+  next();
+};
+
+exports.updateMe = async (req, res, next) => {
+  try {
+    // console.log(req.file);
+    // 1) Create error if user Posts password data
+    if(req.body.password || req.body.passwordConfirm) {
+      return next(
+        sendError({message: 'This route is not for password updates. Please use /updateMyPassword'}, 400, req, res)
+      );
+    }
+    // 2) Filtered out unwanted fields names that are not allowed to be updated
+    const filterBody = filterObj(req.body, 'name', 'email');
+    if(req.file) {
+      filterBody.photo = req.file.filename;
+    }
+    // 3) Update User document
+    const updateUser = await User.findByIdAndUpdate(req.user.id, filterBody, {
+      new: true, runValidators: true
+    });
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        user: updateUser
+      }
+    });
+  } catch(err) {
+    sendError(err, 404, req, res);
+  }
+};
+
+exports.updateTrxKey = async (req, res) => {
+  try {
+    const { trxKey, trxKeyConfirm } = req.body;
+    if(!trxKey || !trxKeyConfirm) {
+      return sendError({message: {form: 'Please provide transaction key and confirmation'}}, 400, req, res);
+    }
+
+    if(trxKey !== trxKeyConfirm) {
+      return sendError({message: {transactionKey: 'Transaction keys must match'}}, 400, req, res);
+    }
+    
+    const updatedUser = await User.findByIdAndUpdate(req.user.id, { transactionKey: trxKey }, {
+      new: true, runValidators: true
+    });
+        
+    createSendToken(updatedUser, 200, res);
+  } catch(err) {
+    sendError(err, 404, req, res);
+  }
+};
+
+exports.submitMessage = async (req, res) => {
+  try {
+    const ipAddressString = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const ipAddress = ipAddressString.split(',')[0];
+
+    const geo = geoip.lookup(ipAddress);
+    const location = `${geo?.city} ${geo?.country} -----timezone: ${geo?.timezone}------`;
+
+    const messageData = {
+      topic: req.body.topic,
+      message: req.body.message,
+      user: req.user.id,
+      ip: ipAddress,
+      location,
+      email: req.user.email,
+      createdAt: Date.now()
+    };
+
+    const newDoc = await Message.create({ ...messageData });
+    res.status(200).json({
+      status: 'success',
+      data: {
+        topic:  newDoc.topic
+      }
+    });
+  } catch(err) {
+    sendError(err, 404, req, res);
+  }
+};
+
+exports.deleteMe = async (req, res, next) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, {active: false});
+    res.status(204).json({
+      status: 'success',
+      message: null
+    });
+  } catch(err) {
+    sendError(err, 404, req, res);
+  }
+};
+
+exports.createUser = async (req, res, next) => {
+  res.status(500).json({
+    status: 'error',
+    message: 'This route si not defined! Please use /signup instead.'
+  });
+};
+
+exports.getAllUsers = factory.getAll(User);
+exports.getUser = factory.getOne(User);
+// Do not update passwords with this!
+exports.updateUser = factory.updateOne(User);
+exports.deleteUser = factory.deleteOne(User);

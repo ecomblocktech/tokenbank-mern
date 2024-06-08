@@ -1,40 +1,32 @@
-import { useEffect } from 'react';
-import { useDispatch } from 'react-redux';
-import { Container } from 'react-bootstrap';
-import { Outlet } from 'react-router-dom';
-import Header from './components/Header';
-import Footer from './components/Footer';
-import { logout } from './slices/authSlice';
+// routes
+import Router from './routes';
+// theme
+import ThemeConfig from './theme';
+import GlobalStyles from './theme/globalStyles';
+// components
+import Settings from './components/settings';
+import RtlLayout from './components/RtlLayout';
+import ScrollToTop from './components/ScrollToTop';
+import { ProgressBarStyle } from './components/LoadingScreen';
+import NotistackProvider from './components/NotistackProvider';
+import ThemePrimaryColor from './components/ThemePrimaryColor';
 
-import { ToastContainer } from 'react-toastify';
-import 'react-toastify/dist/ReactToastify.css';
+// ----------------------------------------------------------------------
 
-const App = () => {
-  const dispatch = useDispatch();
-
-  useEffect(() => {
-    const expirationTime = localStorage.getItem('expirationTime');
-    if (expirationTime) {
-      const currentTime = new Date().getTime();
-
-      if (currentTime > expirationTime) {
-        dispatch(logout());
-      }
-    }
-  }, [dispatch]);
-
+export default function App() {
   return (
-    <>
-      <ToastContainer />
-      <Header />
-      <main className='py-3'>
-        <Container>
-          <Outlet />
-        </Container>
-      </main>
-      <Footer />
-    </>
+    <ThemeConfig>
+      <ThemePrimaryColor>
+        <RtlLayout>
+          <NotistackProvider>
+            <GlobalStyles />
+            <ProgressBarStyle />
+            <Settings />
+            <ScrollToTop />
+            <Router />
+          </NotistackProvider>
+        </RtlLayout>
+      </ThemePrimaryColor>
+    </ThemeConfig>
   );
-};
-
-export default App;
+}
